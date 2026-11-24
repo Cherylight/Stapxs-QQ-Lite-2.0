@@ -16,6 +16,7 @@
         :class="[
             'message', type ?? '',
             { 'revoke': data.revoke },
+            { 'revoked': data.revoked },
             { 'me': isMe && type != 'body' },
             { 'selected': selected },
             { 'right': settingsStore.sysConfig.opt_ind_message === true && type != 'body' },
@@ -54,6 +55,9 @@
                 <a v-else>
                     {{ isMe ? authStore.loginInfo.nickname : chatStore.chatInfo.show.name }}
                 </a>
+                <span v-if="data.revoked" class="revoked" :title="revokedTip">
+                    {{ $t('消息已撤回') }}
+                </span>
                 <a v-if="selected" class="time">
                     {{ Intl.DateTimeFormat(trueLang, {
                         year: 'numeric',
@@ -389,7 +393,7 @@ import Option from '@renderer/function/option'
 import markdownit from 'markdown-it'
 
 import { MsgBodyFuns as ViewFuns } from '@renderer/function/model/msg-body'
-import { watch, onMounted, nextTick, provide, inject, useTemplateRef, ref } from 'vue'
+import { computed, watch, onMounted, nextTick, provide, inject, useTemplateRef, ref } from 'vue'
 import { Connector } from '@renderer/function/connect'
 import { useSettingsStore } from '@renderer/state/settings'
 import { Logger, LogType, PopInfo, PopType } from '@renderer/function/base'
@@ -519,6 +523,22 @@ const resolvedImages = ref({} as Record<string, string>)
 const failedImageSources = ref<Record<number, string>>({})
 const manualImageLoads = ref({} as Record<string, boolean>)
 const pendingImageLoads = ref({} as Record<string, boolean>)
+const revokedTip = computed(() => {
+    if (!data.revoked) return ''
+    const opId = data.recall_info?.operator_id
+    if (
+        chatStore.chatInfo.show.type === 'group' &&
+        opId != null &&
+        String(opId) !== String(data.sender?.user_id)
+    ) {
+        const member = chatStore.chatInfo.info.group_members?.find(
+            (item: IUser) => String(item.user_id) === String(opId),
+        )
+        const opName = member ? (member.card || member.nickname || opId) : opId
+        return `${opName} ${$t('撤回了一条消息')}`
+    }
+    return $t('消息已撤回')
+})
 
 //#endregion
 

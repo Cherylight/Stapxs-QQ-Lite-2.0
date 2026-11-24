@@ -59,11 +59,12 @@
                             @click="copy(msgItem.message_id)">{{
                             getMsgRawTxt(msgItem)
                         }}</span>
+                        <span v-if="msgItem.revoked" class="srevoked">[{{ $t('消息已撤回') }}]</span>
                         <br>
                     </div>
                     <div v-else-if="msgItem.post_type == 'notice'">
                         <span
-                            v-if="msgItem.sub_type == 'recall'"
+                            v-if="msgItem.sub_type == 'recall' || msgItem.notice_type?.includes('recall')"
                             style="color: yellow">::
                             <span style="color: yellow; opacity: 0.7">{{
                                 getRecallName(msgItem.operator_id)
@@ -945,6 +946,11 @@
     }
     .shell-msg > span.smsg {
         color: var(--color-font-2);
+    }
+    .shell-msg > span.srevoked {
+        color: var(--color-red);
+        margin-left: 6px;
+        opacity: 0.85;
     }
     .shell-msg img {
         max-width: 50%;

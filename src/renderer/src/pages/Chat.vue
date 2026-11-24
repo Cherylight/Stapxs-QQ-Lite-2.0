@@ -113,7 +113,8 @@
                         <NoticeBody v-else-if="msgIndex.post_type === 'notice'"
                             :id="uuid()"
                             :key="'notice-' + index"
-                            :data="msgIndex" />
+                            :data="msgIndex"
+                            @reedit="reedit" />
                     </template>
                 </TransitionGroup>
             </template>
@@ -1646,6 +1647,13 @@ function showMsgMeun(event: MenuEventData, data: any) {
                 tags.value.menuDisplay.revoke = false
                 tags.value.menuDisplay.select = false
             }
+            if (data.revoked === true) {
+                tags.value.menuDisplay.relpy = false
+                tags.value.menuDisplay.revoke = false
+                tags.value.menuDisplay.reedit = false
+                tags.value.menuDisplay.respond = false
+                tags.value.menuDisplay.showRespond = false
+            }
             if (details.value[3].open) {
                 Object.keys(tags.value.menuDisplay).forEach(
                     (name: string) => {
@@ -2960,7 +2968,7 @@ function copyMsgs() {
 }
 
 async function recallMsgs() {
-    const msgList = list.filter((item: any) => multipleSelectList.value.includes(item.message_id))
+    const msgList = list.filter((item: any) => multipleSelectList.value.includes(item.message_id) && !item.revoked)
     const tasks: Promise<true | undefined>[] = []
     for (const msgItem of msgList) {
         const msgId = msgItem.message_id

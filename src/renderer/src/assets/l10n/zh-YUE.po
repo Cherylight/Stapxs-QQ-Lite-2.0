@@ -1120,7 +1120,7 @@ msgid "原消息暂不可用，点击重试"
 msgstr ""
 
 msgid "消息已撤回"
-msgstr ""
+msgstr "訊息已收回"
 
 msgid "跳转到引用消息"
 msgstr ""

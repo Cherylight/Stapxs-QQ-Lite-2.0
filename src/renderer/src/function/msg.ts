@@ -63,6 +63,7 @@ import {
 } from '@renderer/components/FileManager.vue'
 import { getOneBotResponseError } from './utils/fileTransferUtil'
 import { expandEmptyHistoryPage, isEmptyHistoryPage, isEmptyHistoryRecord } from './utils/emptyHistory'
+import { antiRecallCache, isSelfRecallNotice, markMessageRevoked } from './utils/antiRecall'
 import { refreshFavicon } from './favicon'
 import { Img } from './model/img'
 import { ensurePinyinLoaded, getPinyin, isPinyinReady } from './utils/pinyin'
@@ -958,6 +959,13 @@ const msgFunctions = {
                     chatStore.chatInfo.show,
                 )) return
                 if (!list || list.length === 0) return
+                if (useSettingsStore().sysConfig.anti_recall === true) {
+                    antiRecallCache.rememberMessages(
+                        authStore.loginInfo.uin,
+                        list,
+                        { type: chatStore.chatInfo.show.type, id: chatStore.chatInfo.show.id },
+                    )
+                }
                 const inserted = insertHistorySegmentAtAnchor(
                     chatStore.messageList,
                     anchorMsgId,
@@ -1321,6 +1329,13 @@ const msgFunctions = {
                             fakeMsg.time = trueMsg[0].time
                             fakeMsg.fake_msg = undefined
                             fakeMsg.revoke = false
+                            if (useSettingsStore().sysConfig.anti_recall === true) {
+                                antiRecallCache.rememberMessages(
+                                    authStore.loginInfo.uin,
+                                    trueMsg,
+                                    { type: chatStore.chatInfo.show.type, id: chatStore.chatInfo.show.id },
+                                )
+                            }
                         }
                     })
                 }
@@ -1762,7 +1777,8 @@ export async function appendHistoryForQuotedMessage(msg: any, isActive: () => bo
 
 async function saveMsg(msg: any, append = undefined as undefined | string, isActive = () => true, keepExisting = false, expandEmpty = false) {
     if (!isActive()) return
-    let list = await normalizeMessagesFromPayload(msg, expandEmpty ? isActive : undefined)
+    const restoreMode = append === 'bottom' ? 'none' : (expandEmpty ? 'latest' : 'page')
+    let list = await normalizeMessagesFromPayload(msg, expandEmpty ? isActive : undefined, restoreMode)
     if (!isActive() || list == undefined || !isSavedMessageForCurrentChat(list)) return
     const uiStore = useUIStore()
     const authStore = useAuthStore()
@@ -1776,8 +1792,11 @@ async function saveMsg(msg: any, append = undefined as undefined | string, isAct
         return
     }
     const selfId = authStore.loginInfo.uin
+    const antiRecall = useSettingsStore().sysConfig.anti_recall === true
     saveMessagesWithSideEffects(selfId, list)
-        .then(() => revokeEmptyHistoryRecords(selfId, list))
+        .then(() => {
+            if (!antiRecall) revokeEmptyHistoryRecords(selfId, list)
+        })
         .catch(error => logger.error(error as Error, '保存历史消息到本地失败'))
     if (!applySavedMessages(list, append, keepExisting)) return
     chatStore.messageList.forEach(item => sendMsgAppendInfo(item))
@@ -1845,11 +1864,34 @@ function updateSavedHistoryPreview() {
 async function normalizeMessagesFromPayload(
     payload: any,
     expandEmpty?: () => boolean,
+    restoreMode: 'latest' | 'page' | 'none' = expandEmpty ? 'latest' : 'page',
 ): Promise<any[] | undefined> {
     const rawList = getMsgData('message_list', payload, msgPath.message_list)
     const map = useAuthStore().jsonMap
     const chat = useChatStore().chatInfo.show
-    const list = await getMessageList(rawList)
+    const selfId = useAuthStore().loginInfo.uin
+    const applyAntiRecall = async (items: any[] | undefined, isLatestPage: boolean): Promise<any[] | undefined> => {
+        if (!items || useSettingsStore().sysConfig.anti_recall !== true) return items
+        antiRecallCache.rememberMessages(selfId, items, { type: chat.type, id: chat.id })
+        if (restoreMode === 'none') {
+            return items.map((item) => antiRecallCache.applyRecallMetaIfKnown(selfId, item))
+        }
+        const restored = antiRecallCache.restoreRecalledInHistory(
+            selfId,
+            chat.type,
+            chat.id,
+            items,
+            { isLatestPage },
+        )
+        const processed = await Promise.all(
+            restored.map((item) => (item?._preprocessed ? item : msgPreprocess(item))),
+        )
+        processed.sort(compareMessageOrder)
+        return processed
+    }
+
+    let list = await getMessageList(rawList)
+    list = await applyAntiRecall(list, restoreMode === 'latest')
     if (!expandEmpty || map.message_list?.pagerType !== 'full' || !list || !isEmptyHistoryPage(list)) return list
     // 首屏历史全部是被撤回的空记录时，向前扩大窗口直到出现可读消息
     const isActive = () => expandEmpty() && useAuthStore().jsonMap === map
@@ -1866,7 +1908,8 @@ async function normalizeMessagesFromPayload(
             if (response?.status !== 'ok' || Number(response.retcode ?? 0) !== 0 || response.data == null) {
                 throw new Error('Empty history expansion failed')
             }
-            return getMessageList(getMsgData('message_list', response, msgPath.message_list))
+            const expanded = await getMessageList(getMsgData('message_list', response, msgPath.message_list))
+            return applyAntiRecall(expanded, true)
         } catch (error) {
             if (isActive()) logger.error(error as Error, '加载被撤回消息之前的历史失败')
             return undefined
@@ -2018,9 +2061,27 @@ function hasResolvableImageSource(msg: any): boolean {
 }
 
 function shouldReplaceDuplicateMessage(existing: any, incoming: any): boolean {
-    // 新的空记录（消息已被撤回）覆盖本地缓存中的旧内容
-    if (isEmptyHistoryRecord(incoming) && existing?.message?.length > 0) return true
     const settingsStore = useSettingsStore()
+    // 新的空记录（消息已被撤回）在非防撤回模式下覆盖本地缓存；防撤回模式下保留原文并标记撤回
+    if (isEmptyHistoryRecord(incoming) && existing?.message?.length > 0) {
+        if (settingsStore.sysConfig.anti_recall === true) {
+            const selfId = useAuthStore().loginInfo.uin
+            const chat = useChatStore().chatInfo.show
+            existing.revoked = true
+            const updated = antiRecallCache.applyRecallMetaIfKnown(selfId, existing)
+            if (updated.recall_info) existing.recall_info = updated.recall_info
+            antiRecallCache.rememberMessages(selfId, [existing], { type: chat.type, id: chat.id })
+            return false
+        }
+        return true
+    }
+    if (isEmptyHistoryRecord(existing) && incoming?.message?.length > 0) {
+        return true
+    }
+    if (incoming?.revoked && existing?.message?.length > 0 && !existing.revoked) {
+        existing.revoked = true
+        if (incoming.recall_info) existing.recall_info = incoming.recall_info
+    }
     if (!hasImageMessage(incoming)) return false
     if (existing?._from_local_db !== true) return false
 
@@ -2114,6 +2175,7 @@ export async function getMessageList(list: any[] | undefined) {
  * @param msg 要处理的消息
  */
 async function msgPreprocess(msg: any): Promise<any> {
+    if (msg?._preprocessed) return msg
     //#region == json 合并转发 ============================
     if (msg.message.at(0)?.type === 'json') {
         try {
@@ -2162,32 +2224,62 @@ async function msgPreprocess(msg: any): Promise<any> {
     }
     msg.message = filter
     //#endregion
+    Object.defineProperty(msg, '_preprocessed', {
+        value: true,
+        enumerable: false,
+        configurable: true,
+    })
     return msg
 }
 
 function revokeMsg(_: string, msg: any) {
     const authStore = useAuthStore()
     const chatStore = useChatStore()
-    // 清除通知
-    const chatId = msg.notice_type.includes('group') ? msg.group_id : msg.user_id
-    new Notify().closeAll(chatId)
+    const settingsStore = useSettingsStore()
+    const isGroupRecall = Boolean(msg.group_id != null || msg.notice_type?.includes('group'))
+    const chatId = isGroupRecall ? msg.group_id : msg.user_id
 
-    // 在本地 DB 中标记撤回
     const msgId = msg.message_id
-    dbRevokeMessage(authStore.loginInfo.uin, String(msgId))
-    if (String(chatId) === String(chatStore.chatInfo.show.id) &&
-        msg.notice_type.includes('group') === (chatStore.chatInfo.show.type === 'group')) {
-        useQuotedMessagesStore().revoke(msgId)
+    const isCurrentChat = String(chatId) === String(chatStore.chatInfo.show.id) &&
+        isGroupRecall === (chatStore.chatInfo.show.type === 'group')
+
+    // 寻找消息（仅在当前会话中查找）
+    let msgGet = null as { [key: string]: any } | null
+    let msgIndex = -1
+    if (isCurrentChat) {
+        for (const [index, item] of chatStore.messageList.entries()) {
+            if (String(item.message_id) === String(msgId)) {
+                msgGet = item
+                msgIndex = index
+                break
+            }
+        }
     }
 
-    // 寻找消息
-    let msgGet = null as { [key: string]: any } | null
-    let msgIndex!: number
-    for (const [index, msg] of chatStore.messageList.entries()) {
-        if (msg.message_id === msgId) {
-            msgGet = msg
-            msgIndex = index
+    const targetForSelfCheck = msgGet ?? antiRecallCache.getRecentMessage(authStore.loginInfo.uin, msgId)
+    const shouldIntercept = settingsStore.sysConfig.anti_recall === true &&
+        !isSelfRecallNotice(msg, authStore.loginInfo.uin, targetForSelfCheck)
+
+    if (shouldIntercept) {
+        const preserved = antiRecallCache.captureRecall(authStore.loginInfo.uin, msg, msgGet)
+        if (isCurrentChat && msgGet && msgGet.post_type !== 'notice' && Array.isArray(msgGet.message) && msgGet.message.length > 0) {
+            chatStore.messageList.splice(msgIndex, 1, preserved ?? markMessageRevoked(msgGet, msg))
+            return
         }
+        if (preserved) {
+            return
+        }
+        // 未能在内存中找到原消息体：保留本地 DB 记录不被标记删除，并允许后续降级为撤回提示
+    } else {
+        // 在本地 DB 中标记撤回
+        dbRevokeMessage(authStore.loginInfo.uin, String(msgId))
+    }
+
+    // 清除通知
+    new Notify().closeAll(chatId)
+
+    if (isCurrentChat) {
+        useQuotedMessagesStore().revoke(msgId)
     }
 
     if (!msgGet) {
@@ -2264,6 +2356,13 @@ function newMsg(_: string, data: any) {
                     fakeMsg.time = trueMsg[0].time
                     fakeMsg.fake_msg = undefined
                     fakeMsg.revoke = false
+                    if (settingsStore.sysConfig.anti_recall === true) {
+                        antiRecallCache.rememberMessages(
+                            authStore.loginInfo.uin,
+                            trueMsg,
+                            { type: chatStore.chatInfo.show.type, id: chatStore.chatInfo.show.id },
+                        )
+                    }
                 }
             })
             // 移除最顶端的一条消息以被动刷新整个列表
@@ -2280,6 +2379,9 @@ function newMsg(_: string, data: any) {
         const list = normalizeNewIncomingMessage(data)
 
         if (list.length > 0) {
+            if (settingsStore.sysConfig.anti_recall === true) {
+                antiRecallCache.rememberMessages(authStore.loginInfo.uin, list)
+            }
             // 保存到本地历史
             saveMessagesWithSideEffects(authStore.loginInfo.uin, list)
             data = list[0]
@@ -2500,6 +2602,7 @@ export function resetRimtime(resetAll = false) {
     clearMetaEventWatchdog()
     groupPreviewHydrator.reset()
     if (resetAll) {
+        antiRecallCache.clear()
         // Reset auth store
         const authStore = useAuthStore()
         authStore.loginInfo = reactive({})

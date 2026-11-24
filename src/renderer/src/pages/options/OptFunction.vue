@@ -100,18 +100,15 @@
         <div class="ss-card">
             <header>{{ $t('聊天选项') }}</header>
             <div class="opt-item">
+                <div :class="checkDefault('anti_recall')" />
                 <font-awesome-icon :icon="['fas', 'box-archive']" />
                 <div>
                     <label for="opt-function-msg-nd">{{ $t('消息防撤回') }}</label>
-                    <span>{{
-                        ndt === 0 ? $t('说出去的话就像泼出去的水 ……') : $t('说了不做这功能就是不做')
-                    }}</span>
+                    <span>{{ $t('说出去的话就像泼出去的水 ……') }}</span>
                 </div>
-                <label
-                    v-if="ndt < 3"
-                    class="ss-switch">
-                    <input id="opt-function-msg-nd" v-model="ndv" type="checkbox"
-                        @change="msgND">
+                <label class="ss-switch">
+                    <input id="opt-function-msg-nd" v-model="settingsStore.sysConfig.anti_recall"
+                        type="checkbox" name="anti_recall" @change="save">
                     <div>
                         <div />
                     </div>
@@ -461,8 +458,6 @@
 
     const dbStats = ref<{ totalMessages: number; imageCount: number; imageCacheBytes: number; dbSizeBytes: number } | null>(null)
     const clearImageProgressText = ref('')
-    const ndt = ref(0)
-    const ndv = ref(false)
 
     watch(() => authStore.loginInfo.uin, (uin) => {
         if (uin && settingsStore.sysConfig.enable_local_history) {
@@ -497,13 +492,6 @@
             allowQuickClose: false
         }
         uiStore.popBoxList.push(popInfo)
-    }
-
-    function msgND() {
-        ndt.value++
-        setTimeout(() => {
-            ndv.value = false
-        }, 300)
     }
 
     function toggleSessionDisplay(event: Event) {

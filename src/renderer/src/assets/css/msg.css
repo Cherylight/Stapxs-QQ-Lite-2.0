@@ -105,6 +105,13 @@
     display: flex;
     opacity: 0.4;
 }
+.message.revoked > div.message-body > div {
+    opacity: 0.78;
+    transition: opacity 0.2s;
+}
+.message.revoked:hover > div.message-body > div {
+    opacity: 1;
+}
 .message.body-only > div.message-body {
     max-width: 100%;
     width: 100%;
@@ -157,6 +164,10 @@
 }
 .message-body > header > span.robot {
     background: var(--color-blue);
+}
+.message-body > header > span.revoked {
+    background: var(--color-red);
+    margin-left: 3px;
 }
 .message-body > header > a {
     color: var(--color-font-1);

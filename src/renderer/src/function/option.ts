@@ -104,6 +104,7 @@ export const optDefault: { [key: string]: any } = {
     // Function
     close_notice: false,
     notice_persist: false,
+    anti_recall: false,
     bubble_sort_user: true,
     session_display_mode: 'recent' as 'recent' | 'all',
     close_respond: false,

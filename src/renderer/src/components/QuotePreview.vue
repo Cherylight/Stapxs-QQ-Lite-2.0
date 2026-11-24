@@ -3,7 +3,7 @@
         <button type="button" class="quote-open" :aria-label="label"
             @click.stop="activate" />
         <div v-if="original && !original.revoke">
-            <span>{{ original.sender.card || original.sender.nickname }} {{ time }}</span>
+            <span>{{ original.sender.card || original.sender.nickname }} {{ time }}{{ original.revoked ? ` · ${$t('消息已撤回')}` : '' }}</span>
             <font-awesome-icon :icon="['fas', 'turn-up']" />
         </div>
         <span v-if="original?.revoke" class="msg-unknown">{{ $t('消息已撤回') }}</span>

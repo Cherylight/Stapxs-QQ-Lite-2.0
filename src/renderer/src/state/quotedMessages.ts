@@ -7,6 +7,8 @@ import { QuotedMessageLoader, QuoteRequestError, requestQuotedMessage } from '@r
 import type { QuoteEntry } from '@renderer/function/utils/quotedMessage'
 import { useAuthStore } from './auth'
 import { useChatStore } from './chat'
+import { useSettingsStore } from './settings'
+import { antiRecallCache } from '@renderer/function/utils/antiRecall'
 
 export const useQuotedMessagesStore = defineStore('quoted-messages', () => {
     const authStore = useAuthStore()
@@ -36,8 +38,13 @@ export const useQuotedMessagesStore = defineStore('quoted-messages', () => {
     }, { flush: 'sync' })
 
     function localMessage(id: string | number) {
-        return chatStore.messageList.find(message => String(message.message_id) === String(id) &&
+        const inList = chatStore.messageList.find(message => String(message.message_id) === String(id) &&
             Array.isArray(message.message) && message.sender)
+        if (inList) return inList
+        if (useSettingsStore().sysConfig.anti_recall === true && authStore.loginInfo.uin) {
+            return antiRecallCache.getRecalledMessage(authStore.loginInfo.uin, id) ?? undefined
+        }
+        return undefined
     }
 
     function entry(id: string | number) {

@@ -10,6 +10,7 @@ import { getMsgRawTxt } from './msgUtil'
 import { Logger } from '../base'
 import { useSettingsStore } from '@renderer/state/settings'
 import { useAuthStore } from '@renderer/state/auth'
+import { antiRecallCache } from './antiRecall'
 
 const logger = new Logger()
 
@@ -57,7 +58,11 @@ async function callDbRecordList(
             true,
             { selfId: String(selfId), ...payload },
         )
-        return (records ?? []).map(deserializeRecord)
+        const list = (records ?? []).map(deserializeRecord)
+        if (useSettingsStore().sysConfig.anti_recall === true) {
+            return list.map((record) => antiRecallCache.applyRecallMetaIfKnown(selfId, record))
+        }
+        return list
     } catch (e) {
         logger.error(e as unknown as Error, errorTag)
         return []
@@ -151,6 +156,7 @@ export function ensureChatIdOnMsgs(selfId: string | number, msgs: any[]): any[] 
 export function msgToRecord(msg: any): LocalMsgRecord | null {
     const messageId = msg.message_id
     if (!messageId) return null
+    if (!Array.isArray(msg.message) || msg.message.length === 0) return null
 
     const chatId: number = msg.infoList.group_id ?? msg.infoList.target_id
     if (chatId == null) return null
@@ -189,7 +195,7 @@ export function msgToRecord(msg: any): LocalMsgRecord | null {
  * @param msgs    已完成预处理的消息对象数组（来自 chatStore.messageList 或 newMsg）
  */
 export async function dbSaveMessages(selfId: string | number, msgs: any[]): Promise<void> {
-    if (!isTauriHistoryAvailable()) return
+    if (!isTauriHistoryAvailable() || msgs.length === 0) return
 
     const persistableMsgs = ensureChatIdOnMsgs(selfId, msgs)
     const records: LocalMsgRecord[] = persistableMsgs
@@ -197,7 +203,12 @@ export async function dbSaveMessages(selfId: string | number, msgs: any[]): Prom
         .filter((r): r is LocalMsgRecord => r !== null)
 
     if (records.length === 0) {
-        logger.error(null, '[LocalHistory] dbSaveMessages: 没有有效消息可保存')
+        const hasNonEmptyInput = persistableMsgs.some(
+            (m) => Array.isArray(m?.message) && m.message.length > 0,
+        )
+        if (hasNonEmptyInput) {
+            logger.error(null, '[LocalHistory] dbSaveMessages: 没有有效消息可保存')
+        }
         return
     }
 
