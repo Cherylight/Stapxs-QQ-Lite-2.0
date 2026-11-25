@@ -72,43 +72,53 @@ export function registerChatScrollJumpHandler(
     chatScrollJumpHandler = handler
 }
 
+function applyFallbackScroll(
+    pan: HTMLElement,
+    msg: HTMLElement,
+    showAnimation: boolean,
+    centerInView: boolean,
+) {
+    // A programmatic quote jump must not trigger scroll-at-zero paging.
+    const targetTop = centerInView ? Math.max(1, msg.offsetTop - (pan.clientHeight - msg.offsetHeight) / 2) : msg.offsetTop - msg.offsetHeight + 10
+    if (showAnimation !== false && typeof pan.scrollTo === 'function') {
+        pan.scrollTo({ top: targetTop, behavior: 'smooth' })
+        return
+    }
+    pan.style.scrollBehavior = 'auto'
+    pan.scrollTop = targetTop
+}
+
+function highlightScrolledMessage(msg: HTMLElement) {
+    msg.style.transition = 'background 1s'
+    msg.style.background = 'rgba(0, 0, 0, 0.06)'
+    setTimeout(() => {
+        msg.style.background = 'unset'
+        setTimeout(() => {
+            msg.style.transition = 'background .3s'
+        }, 1100)
+    }, 3000)
+}
+
 /**
  * 滚动到目标消息（不自动加载）
  * @param seqName DOM 名（chat-xx）
  */
 export function scrollToMsg(seqName: string, showAnimation: boolean, showHighlight = true, centerInView = false): boolean {
     const msg = document.getElementById(seqName)
-    if (msg) {
-        const pan = document.getElementById('msgPan')
-        if (pan !== null) {
-            const handled = chatScrollJumpHandler?.(msg, {
-                smooth: showAnimation !== false,
-                centerInView,
-            })
-            if (!handled) {
-                // A programmatic quote jump must not trigger scroll-at-zero paging.
-                const targetTop = centerInView? Math.max(1, msg.offsetTop - (pan.clientHeight - msg.offsetHeight) / 2): msg.offsetTop - msg.offsetHeight + 10
-                if (showAnimation !== false && typeof pan.scrollTo === 'function') {
-                    pan.scrollTo({ top: targetTop, behavior: 'smooth' })
-                } else {
-                    pan.style.scrollBehavior = 'auto'
-                    pan.scrollTop = targetTop
-                }
-            }
-            if (showHighlight) {
-                msg.style.transition = 'background 1s'
-                msg.style.background = 'rgba(0, 0, 0, 0.06)'
-                setTimeout(() => {
-                    msg.style.background = 'unset'
-                    setTimeout(() => {
-                        msg.style.transition = 'background .3s'
-                    }, 1100)
-                }, 3000)
-            }
-            return true
-        }
+    const pan = msg ? document.getElementById('msgPan') : null
+    if (!msg || !pan) return false
+
+    const handled = chatScrollJumpHandler?.(msg, {
+        smooth: showAnimation !== false,
+        centerInView,
+    })
+    if (!handled) {
+        applyFallbackScroll(pan, msg, showAnimation, centerInView)
     }
-    return false
+    if (showHighlight) {
+        highlightScrolledMessage(msg)
+    }
+    return true
 }
 
 /**
@@ -137,7 +147,7 @@ export function openLink(url: string) {
 export async function loadHistory(
     info: BaseChatInfoElem,
     options?: { clearBeforeLoad?: boolean },
-) {
+): Promise<boolean> {
     const authStore = useAuthStore()
     const chatStore = useChatStore()
     const uiStore = useUIStore()
@@ -167,7 +177,7 @@ export async function loadHistory(
         if (!historyRequestTracker.isActive(
             request.generation,
             chatStore.chatInfo.show,
-        )) return
+        )) return false
 
         if (localMsgs.length > 0) {
             chatStore.messageList = localMsgs
@@ -177,7 +187,7 @@ export async function loadHistory(
     if (!historyRequestTracker.isActive(
         request.generation,
         chatStore.chatInfo.show,
-    )) return
+    )) return false
 
     if (!loadHistoryMessage(
         info.id,
@@ -196,7 +206,9 @@ export async function loadHistory(
             app.config.globalProperties.$t('加载历史消息失败'),
             false,
         )
+        return false
     }
+    return true
 }
 export function loadHistoryMessage(
     id: number,
