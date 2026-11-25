@@ -158,6 +158,21 @@
                 </label>
             </div>
             <div class="opt-item">
+                <div :class="checkDefault('opt_no_auto_load_video')" />
+                <font-awesome-icon :icon="['fas', 'video']" />
+                <div>
+                    <label for="opt-function-no-auto-load-video">{{ $t('不自动加载视频') }}</label>
+                    <span>{{ $t('视频消息默认显示占位符，点击后再加载') }}</span>
+                </div>
+                <label class="ss-switch">
+                    <input id="opt-function-no-auto-load-video" v-model="settingsStore.sysConfig.opt_no_auto_load_video"
+                        type="checkbox" name="opt_no_auto_load_video" @change="save">
+                    <div>
+                        <div />
+                    </div>
+                </label>
+            </div>
+            <div class="opt-item">
                 <div :class="checkDefault('use_breakline')" />
                 <font-awesome-icon :icon="['fas', 'keyboard']" />
                 <div>

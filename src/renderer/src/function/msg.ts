@@ -1234,15 +1234,43 @@ const msgFunctions = {
     ) => {
         const chatStore = useChatStore()
         const data = getMsgData('file_download', msg, msgPath.file_download)[0]
-        let url = data.file_url
-        const msgId = echoList[1]
-        const ext = echoList[2]
-        if (url) {
-            // 寻找消息
-            const msg = chatStore.messageList.find((item) => {
-                return item.message_id == msgId
-            })
-            if (msg) {
+        let url = data?.file_url
+        const ext = echoList.at(-1) ?? ''
+        const msgId = echoList.slice(1, -1).join('_')
+        if (url && msgId) {
+            const findById = (list: any[] | undefined) => {
+                if (!Array.isArray(list)) return undefined
+                return list.find(
+                    (item) => item?.message_id != null && String(item.message_id) === String(msgId),
+                )
+            }
+            const findByFileId = (list: any[] | undefined) => {
+                if (!Array.isArray(list)) return undefined
+                return list.find(
+                    (item) =>
+                        Array.isArray(item?.message) &&
+                        item.message.some(
+                            (seg: any) => seg?.file_id != null && String(seg.file_id) === String(msgId),
+                        ),
+                )
+            }
+            let targetMsg = findById(chatStore.messageList)
+            if (!targetMsg) {
+                for (const layer of chatStore.mergeMsgStack) {
+                    targetMsg = findById(layer.messageList)
+                    if (targetMsg) break
+                }
+            }
+            if (!targetMsg) {
+                targetMsg = findByFileId(chatStore.messageList)
+            }
+            if (!targetMsg) {
+                for (const layer of chatStore.mergeMsgStack) {
+                    targetMsg = findByFileId(layer.messageList)
+                    if (targetMsg) break
+                }
+            }
+            if (targetMsg) {
                 if (document.location.protocol == 'https:') {
                     // 判断文件 URL 的协议
                     // PS：Chrome 不会对 http 文件进行协议升级
@@ -1250,8 +1278,9 @@ const msgFunctions = {
                         url = 'https' + url.substring(url.indexOf('://'))
                     }
                 }
-                msg.fileView.url = url
-                msg.fileView.ext = ext
+                if (!targetMsg.fileView) targetMsg.fileView = {}
+                targetMsg.fileView.url = url
+                targetMsg.fileView.ext = ext
             }
         }
     },

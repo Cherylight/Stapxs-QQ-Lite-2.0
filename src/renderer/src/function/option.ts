@@ -101,6 +101,7 @@ export const optDefault: { [key: string]: any } = {
     use_super_face: true,
     opt_ind_message: false,
     opt_no_auto_load_image: false,
+    opt_no_auto_load_video: false,
     // Function
     close_notice: false,
     notice_persist: false,

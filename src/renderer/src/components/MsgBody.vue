@@ -167,7 +167,7 @@
                                         <font-awesome-icon :icon="['fas', 'file']" />
                                         {{ chatStore.chatInfo.show.type == 'group' ? $t('群文件') : $t('离线文件') }}
                                     </a>
-                                    <p>{{ loadFileBase( item, item.name ?? item.file_name, data.message_id) }}</p>
+                                    <p>{{ loadFileBase(item, getFileItemName(item), data.message_id, Number(index)) }}</p>
                                 </div>
                                 <i>{{ getSizeFromBytes(item.size ?? item.file_size) }}</i>
                             </div>
@@ -176,32 +176,54 @@
                                     :icon="['fas', 'angle-down']"
                                     @click="downloadFile(item, data.message_id)" />
                             </div>
-                            <div v-if="data.fileView && Object.keys(data.fileView).length > 0"
+                            <div v-if="shouldShowFileView(item, Number(index))"
                                 class="file-view">
-                                <img v-if="['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(data.fileView.ext)"
-                                    :src="data.fileView.url">
-                                <video v-else-if="['mp4', 'avi', 'mkv', 'flv'].includes(data.fileView.ext)"
+                                <img v-if="fileView?.url && ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(String(fileView.ext || '').toLowerCase())"
+                                    :src="fileView.url">
+                                <button v-else-if="shouldShowFileVideoPlaceholder(item, Number(index))"
+                                    type="button"
+                                    :title="$t('点击加载视频')"
+                                    class="msg-img-placeholder msg-video-placeholder file-video-placeholder"
+                                    @click="loadFileVideo(item, Number(index))">
+                                    <font-awesome-icon
+                                        :icon="['fas', isFileVideoPending(item, Number(index)) ? 'spinner' : 'video']"
+                                        :spin="isFileVideoPending(item, Number(index))" />
+                                    <span>
+                                        {{ isFileVideoPending(item, Number(index)) ? $t('加载中') : $t('点击加载视频') }}
+                                    </span>
+                                </button>
+                                <video v-else-if="isFileViewVideo(fileView)"
                                     playsinline controls muted
                                     autoplay>
-                                    <source :src="data.fileView.url"
-                                        :type="'video/' + data.fileView.ext">
+                                    <source :src="fileView.url"
+                                        :type="'video/' + String(fileView.ext).toLowerCase()">
                                     现在还有不支持 video tag 的浏览器吗？
                                 </video>
-                                <span v-else-if="['txt', 'md'].includes(data.fileView.ext) && (item.size ?? item.file_size) < 2000000" class="txt">
-                                    <a>&gt; {{ item.name }} - {{ $t('文件预览') }}</a>
-                                    {{ getTxtUrl(data.fileView) }}{{ data.fileView.txt }}
+                                <span v-else-if="fileView?.url && ['txt', 'md'].includes(String(fileView.ext || '').toLowerCase()) && (item.size ?? item.file_size) < 2000000" class="txt">
+                                    <a>&gt; {{ getFileItemName(item) }} - {{ $t('文件预览') }}</a>
+                                    {{ getTxtUrl(fileView) }}{{ fileView.txt }}
                                 </span>
                             </div>
                         </div>
-                        <div v-else-if="item.type == 'video'"
-                            class="msg-video">
-                            <video playsinline controls muted
-                                autoplay>
-                                <source :src="item.url"
-                                    type="video/mp4">
-                                现在还有不支持 video tag 的浏览器吗？
-                            </video>
-                        </div>
+                        <template v-else-if="item.type == 'video'">
+                            <button v-if="shouldShowVideoPlaceholder(item, Number(index))"
+                                type="button"
+                                :title="$t('点击加载视频')"
+                                :class="imgStyle(data.message.length, Number(index), false) + ' msg-img-placeholder msg-video-placeholder'"
+                                @click="loadVideo(item, Number(index))">
+                                <font-awesome-icon :icon="['fas', 'video']" />
+                                <span>{{ $t('点击加载视频') }}</span>
+                            </button>
+                            <div v-else
+                                class="msg-video">
+                                <video playsinline controls muted
+                                    autoplay>
+                                    <source :src="item.url"
+                                        type="video/mp4">
+                                    现在还有不支持 video tag 的浏览器吗？
+                                </video>
+                            </div>
+                        </template>
                         <template v-else-if="item.type == 'record'">
                             <VoiceMsg
                                 :item="item"
@@ -393,12 +415,21 @@ import Option from '@renderer/function/option'
 import markdownit from 'markdown-it'
 
 import { MsgBodyFuns as ViewFuns } from '@renderer/function/model/msg-body'
-import { computed, watch, onMounted, nextTick, provide, inject, useTemplateRef, ref } from 'vue'
+import { computed, watch, onMounted, nextTick, provide, inject, useTemplateRef, ref, toRaw } from 'vue'
 import { Connector } from '@renderer/function/connect'
 import { useSettingsStore } from '@renderer/state/settings'
 import { Logger, LogType, PopInfo, PopType } from '@renderer/function/base'
 import { StringifyOptions } from 'querystring'
 import { getMsgRawTxt, isImageFace, pokeAnime } from '@renderer/function/utils/msgUtil'
+import {
+    getFileExtension,
+    getFileItemName,
+    getVideoLoadKey,
+    isVideoFileExt,
+    isVideoFileItem,
+    shouldAutoFetchFilePreview,
+    shouldDeferVideoLoad,
+} from '@renderer/function/utils/videoLoad'
 import {
     isRobot,
     openLink,
@@ -523,6 +554,19 @@ const resolvedImages = ref({} as Record<string, string>)
 const failedImageSources = ref<Record<number, string>>({})
 const manualImageLoads = ref({} as Record<string, boolean>)
 const pendingImageLoads = ref({} as Record<string, boolean>)
+const manualVideoLoads = ref({} as Record<string, boolean>)
+const pendingFileVideoLoads = ref({} as Record<string, boolean>)
+const localFileView = ref<Record<string, any> | undefined>(undefined)
+const fileView = computed(() => {
+    if (data.fileView && (data.fileView.url || Object.keys(data.fileView).length > 0)) {
+        return data.fileView
+    }
+    return localFileView.value
+})
+
+watch(() => fileView.value?.url, (url) => {
+    if (url) pendingFileVideoLoads.value = {}
+})
 const revokedTip = computed(() => {
     if (!data.revoked) return ''
     const opId = data.recall_info?.operator_id
@@ -608,6 +652,49 @@ function shouldShowImagePlaceholder(item: { type: string, url: string }, index: 
     if (settingsStore.sysConfig.opt_no_auto_load_image !== true) return false
 
     return manualImageLoads.value[getImageKey(index, item.url)] !== true
+}
+
+function getVideoKey(index: number, item: any) {
+    return getVideoLoadKey(data, index, item?.url ?? item?.file_id ?? getFileItemName(item))
+}
+
+function shouldShowVideoPlaceholder(item: any, index: number) {
+    if (item?.type !== 'video') return false
+    return shouldDeferVideoLoad(
+        settingsStore.sysConfig.opt_no_auto_load_video,
+        manualVideoLoads.value[getVideoKey(index, item)],
+    )
+}
+
+function loadVideo(item: any, index: number) {
+    manualVideoLoads.value[getVideoKey(index, item)] = true
+}
+
+function isFileViewVideo(view: any) {
+    return Boolean(view?.url) && isVideoFileExt(view?.ext)
+}
+
+function isFileVideoPending(item: any, index: number) {
+    return pendingFileVideoLoads.value[getVideoKey(index, item)] === true && !fileView.value?.url
+}
+
+function shouldShowFileVideoPlaceholder(item: any, index: number) {
+    if (!isVideoFileItem(item) && !isFileViewVideo(fileView.value)) return false
+    if (
+        shouldDeferVideoLoad(
+            settingsStore.sysConfig.opt_no_auto_load_video,
+            manualVideoLoads.value[getVideoKey(index, item)],
+        )
+    ) {
+        return true
+    }
+    return isFileVideoPending(item, index)
+}
+
+function shouldShowFileView(item: any, index: number) {
+    const view = fileView.value
+    const hasFileView = Boolean(view) && Object.keys(view).length > 0
+    return hasFileView || shouldShowFileVideoPlaceholder(item, index)
 }
 
 function getAtClass(who: number | string) {
@@ -917,38 +1004,115 @@ function textClick(event: Event) {
     }
 }
 
+function findMutableMessage(): Record<string, any> | undefined {
+    const rawData = toRaw(data)
+    const byRef = (item: any) => toRaw(item) === rawData
+    const byId = (item: any) =>
+        data.message_id != null &&
+        item?.message_id != null &&
+        String(item.message_id) === String(data.message_id)
+
+    const fromList = chatStore.messageList.find(byRef)
+    if (fromList) return fromList
+    for (const layer of chatStore.mergeMsgStack) {
+        const fromMerge = layer.messageList?.find(byRef)
+        if (fromMerge) return fromMerge
+    }
+
+    const fromListById = chatStore.messageList.find(byId)
+    if (fromListById) return fromListById
+    for (const layer of chatStore.mergeMsgStack) {
+        const fromMergeById = layer.messageList?.find(byId)
+        if (fromMergeById) return fromMergeById
+    }
+    return undefined
+}
+
+function setMessageFileView(nextView: Record<string, any>) {
+    const target = findMutableMessage()
+    if (target) {
+        target.fileView = nextView
+    } else {
+        localFileView.value = nextView
+    }
+}
+
+function requestFilePreviewUrl(fileData: any, ext: string, force = false): boolean {
+    if (!force && (data.fileView != undefined || localFileView.value != undefined)) {
+        return false
+    }
+    if (fileData?.url) {
+        setMessageFileView({ url: fileData.url, ext })
+        return true
+    }
+
+    let dlName = authStore.jsonMap.file_download?.private_name
+    if (chatStore.chatInfo.show.type == 'group') {
+        dlName = authStore.jsonMap.file_download?.name
+    }
+    const msgKey = data.message_id ?? fileData?.file_id
+    if (dlName && fileData?.file_id && msgKey != null) {
+        const target = findMutableMessage()
+        if (target) {
+            target.fileView = target.fileView ?? {}
+        }
+        Connector.send(
+            dlName,
+            {
+                file_id: fileData.file_id,
+                group_id: chatStore.chatInfo.show.type == 'group' ? chatStore.chatInfo.show.id : undefined,
+            },
+            'loadFileBase_' + msgKey + '_' + ext,
+        )
+        return true
+    }
+    return false
+}
+
 function loadFileBase(
     fileData: any,
     name: string,
-    message_id: StringifyOptions,
+    _messageId: StringifyOptions,
+    index = 0,
 ) {
-    const ext = name.split('.').pop()
-    const msg = chatStore.messageList.find(
-        (item) => item.message_id === message_id,
-    )
-    if (ext && msg?.fileView == undefined) {
+    const ext = getFileExtension(name)
+    if (ext && data.fileView == undefined && !isFileVideoPending(fileData, index)) {
         const list = [
             'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp',
             'mp4', 'avi', 'mkv', 'flv',
             'txt', 'md',
         ]
-        if (list.includes(ext)) {
-            msg.fileView = {}
-            let dlName = authStore.jsonMap.file_download?.private_name
-            if(chatStore.chatInfo.show.type == 'group') {
-                dlName = authStore.jsonMap.file_download?.name
-            }
-            if(dlName) {
-                Connector.send(dlName, {
-                    file_id: fileData.file_id,
-                    group_id: chatStore.chatInfo.show.type == 'group' ? chatStore.chatInfo.show.id : undefined,
-                },
-                    'loadFileBase_' + data.message_id + '_' + ext,
-                )
-            }
+        if (
+            list.includes(ext) &&
+            shouldAutoFetchFilePreview(
+                ext,
+                settingsStore.sysConfig.opt_no_auto_load_video,
+                manualVideoLoads.value[getVideoKey(index, fileData)],
+            )
+        ) {
+            requestFilePreviewUrl(fileData, ext)
         }
     }
     return name
+}
+
+function loadFileVideo(item: any, index: number) {
+    const key = getVideoKey(index, item)
+    if (pendingFileVideoLoads.value[key]) return
+
+    manualVideoLoads.value[key] = true
+    if (fileView.value?.url) return
+
+    const ext = getFileExtension(getFileItemName(item)) || 'mp4'
+    const requested = requestFilePreviewUrl(item, ext, true)
+    if (!requested) {
+        manualVideoLoads.value[key] = false
+        new PopInfo().add(PopType.ERR, $t('加载失败'))
+        return
+    }
+    if (!fileView.value?.url) {
+        pendingFileVideoLoads.value[key] = true
+    }
 }
 
 function getTxtUrl(view: any) {

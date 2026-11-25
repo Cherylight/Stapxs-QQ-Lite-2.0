@@ -827,6 +827,16 @@ span.user-title.robot {
     margin: -10px;
     width: 100%;
 }
+.file-view > .file-video-placeholder {
+    width: 100%;
+    min-width: 180px;
+    min-height: 110px;
+    border-radius: 7px;
+}
+.msg-file.me .file-video-placeholder {
+    border-color: rgba(var(--color-font-r-rgb), 0.35) !important;
+    color: var(--color-font-1-r);
+}
 .file-view > span.txt {
     font-family: monospace;
     white-space: pre-wrap;
