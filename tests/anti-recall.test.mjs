@@ -6,6 +6,29 @@ import {
     isSelfRecallNotice,
     markMessageRevoked,
 } from '../src/renderer/src/function/utils/antiRecall.ts'
+import {
+    canUseHistoryMedia,
+    notifyMessageRecall,
+    watchMediaRecall,
+} from '../src/renderer/src/function/utils/messageMedia.ts'
+
+test('retained media stays available until a matching ordinary recall', () => {
+    const message = markMessageRevoked({ message_id: 12, message: [{ type: 'image', url: 'https://example.test/image' }] })
+    assert.equal(canUseHistoryMedia(message), true)
+    assert.equal(canUseHistoryMedia({ revoked: true }), false)
+    const chat = { id: 42, type: 'group' }
+    const stop = watchMediaRecall(11, chat, message)
+    try {
+        notifyMessageRecall({ selfId: 99, chat, messageId: 12 })
+        notifyMessageRecall({ selfId: 11, chat: { ...chat, type: 'private' }, messageId: 12 })
+        notifyMessageRecall({ selfId: 11, chat, messageId: 13 })
+        assert.equal(canUseHistoryMedia(message), true)
+        notifyMessageRecall({ selfId: '11', chat, messageId: '12' })
+        assert.equal(canUseHistoryMedia(message), false)
+    } finally {
+        stop()
+    }
+})
 
 test('isSelfRecallNotice distinguishes self recalls from peer or admin recalls', () => {
     // Private chat: self recalling own message (even when notice.user_id is peer chat ID)

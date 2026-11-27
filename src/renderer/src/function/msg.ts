@@ -58,11 +58,23 @@ import { backend } from '@renderer/runtime/backend'
 import {
     dbRefreshImageUrl,
     dbRevokeMessage,
-    getOrDownloadHistoryImage,
+    getMessageHistoryChat,
     isTauriHistoryAvailable,
+    loadHistoryImage,
     saveMessagesWithSideEffects,
 } from './utils/localHistoryUtil'
-import { fillMissingForwards, hasForwardContent, normalizeForwardSegments } from './utils/messageMedia'
+import {
+    canUseHistoryMedia,
+    fillMissingForwards,
+    hasForwardContent,
+    historyChatForView,
+    invalidateHistoryMedia,
+    normalizeForwardSegments,
+    notifyMessageRecall,
+    sameHistoryChat,
+    watchMediaRecall,
+    type HistoryChat,
+} from './utils/messageMedia'
 import {
     addDownloadTask,
     completeUploadTask,
@@ -1840,7 +1852,7 @@ async function saveMsg(
 /** 本地 DB 写入不会覆盖已有记录，被撤回的空记录需要单独把同 ID 的缓存标记为已撤回 */
 function revokeEmptyHistoryRecords(selfId: string | number, list: any[]) {
     list.filter(isEmptyHistoryRecord)
-        .forEach(item => dbRevokeMessage(selfId, String(item.message_id)))
+        .forEach(item => { void dbRevokeMessage(selfId, String(item.message_id)) })
 }
 
 function isSavedMessageForCurrentChat(list: any[]): boolean {
@@ -2110,7 +2122,7 @@ function shouldReplaceDuplicateMessage(existing: any, incoming: any): boolean {
             const chat = useChatStore().chatInfo.show
             existing.revoked = true
             const updated = antiRecallCache.applyRecallMetaIfKnown(selfId, existing)
-            if (updated.recall_info) existing.recall_info = updated.recall_info
+            existing.recall_info = updated.recall_info ?? markMessageRevoked(existing).recall_info
             antiRecallCache.rememberMessages(selfId, [existing], { type: chat.type, id: chat.id })
             return false
         }
@@ -2123,7 +2135,7 @@ function shouldReplaceDuplicateMessage(existing: any, incoming: any): boolean {
         existing.revoked = true
         if (incoming.recall_info) existing.recall_info = incoming.recall_info
     }
-    if (!existing?.revoked) fillMissingForwards(existing?.message, incoming?.message)
+    if (existing && canUseHistoryMedia(existing)) fillMissingForwards(existing.message, incoming?.message)
     if (!hasImageMessage(incoming)) return false
     if (existing?._from_local_db !== true) return false
 
@@ -2219,18 +2231,18 @@ export async function fetchForwardContent(id: string | number | undefined) {
     return hasForwardContent({ type: 'forward', content }) ? content : undefined
 }
 
-export function createMessageImageList(messages: any[], skipMarketFace = false) {
-    const selfId = useAuthStore().loginInfo.uin
+export function createMessageImageList(messages: any[], skipMarketFace = false, chat?: HistoryChat) {
+    const authStore = useAuthStore()
+    const selfId = authStore.loginInfo.uin
     const useLocalStorage = selfId && isTauriHistoryAvailable()
     const images: Img[] = []
     for (const message of messages) {
-        if (!Array.isArray(message?.message)) continue
+        if (!Array.isArray(message?.message) || !canUseHistoryMedia(message)) continue
+        const canShow = useLocalStorage ? () => canUseHistoryMedia(message) && authStore.loginInfo.uin === selfId : undefined
         for (const [index, item] of message.message.entries()) {
             if (item?.type !== 'image' || (skipMarketFace && item.file === 'marketface')) continue
-            const load = useLocalStorage
-                ? () => resolveHistoryMessageImage(selfId, message, index)
-                : undefined
-            images.push(new Img(item.url ?? '', item, load))
+            const load = useLocalStorage ? () => resolveHistoryMessageImage(selfId, message, index, chat) : undefined
+            images.push(new Img(item.url ?? '', item, load, canShow))
         }
     }
     return Img.fromList(images)
@@ -2240,37 +2252,51 @@ export async function resolveHistoryMessageImage(
     selfId: string | number,
     message: any,
     index: number,
+    owningChat?: HistoryChat,
 ): Promise<string | undefined> {
     const authStore = useAuthStore()
-    const sameAccount = () => String(authStore.loginInfo.uin) === String(selfId)
     const item = message.message?.[index]
-    if (!isTauriHistoryAvailable() || !sameAccount() || item?.type !== 'image') return
-    const previousUrl = typeof item.url === 'string' ? item.url : undefined
-    const resolved = previousUrl && await getOrDownloadHistoryImage(selfId, previousUrl)
-    if (!sameAccount()) return
-    if (resolved) return resolved
-    if (!login.status || message.revoked || !message.message_id) return
-
-    const messageId = String(message.message_id)
-    const numericId = Number(messageId)
-    const requestId = Number.isSafeInteger(numericId) && String(numericId) === messageId ? numericId : message.message_id
-    const action = authStore.jsonMap.get_message?.name ?? 'get_msg'
+    if (item?.type !== 'image') return
+    const originalUrl = item.url
+    const previousUrl = typeof originalUrl === 'string' ? originalUrl : undefined
+    const isCurrent = () => isTauriHistoryAvailable() && String(authStore.loginInfo.uin) === String(selfId) &&
+        canUseHistoryMedia(message) && message.message?.[index] === item && item.url === originalUrl
+    if (!isCurrent()) return
+    const chat = owningChat && getMessageHistoryChat(selfId, message, owningChat)
+    if (owningChat && !sameHistoryChat(owningChat, chat)) return
+    const messageId = message.message_id == null ? '' : String(message.message_id)
+    const stopWatching = watchMediaRecall(selfId, chat, message)
     try {
-        const response = await Connector.callRawApi(action, { message_id: requestId }, 8000)
-        if (!sameAccount() || response?.status !== 'ok' || Number(response.retcode ?? 0) !== 0 ||
-            String(response.data?.message_id) !== messageId) return
-        const [fresh] = normalizeNewIncomingMessage(response.data)
-        const imageIndex = getImageSegments(message).indexOf(item)
-        const url = getImageSegments(fresh)[imageIndex]?.url
-        if (typeof url !== 'string') return
-        const src = await getOrDownloadHistoryImage(selfId, url)
-        if (!src || !sameAccount()) return
-        await dbRefreshImageUrl(selfId, message, index, previousUrl, url)
-        if (!sameAccount()) return
-        if (message.message[index] === item && item.url === previousUrl) item.url = url
-        return src
+        let url = previousUrl
+        let image = url ? await loadHistoryImage(selfId, url) : undefined
+        if (!isCurrent()) return
+        if (!image && chat && login.status && messageId) {
+            const numericId = Number(messageId)
+            const requestId = Number.isSafeInteger(numericId) && String(numericId) === messageId ? numericId : message.message_id
+            const action = authStore.jsonMap.get_message?.name ?? 'get_msg'
+            const response = await Connector.callRawApi(action, { message_id: requestId }, 8000)
+            if (!isCurrent() || response?.status !== 'ok' || Number(response.retcode ?? 0) !== 0 ||
+                String(response.data?.message_id) !== messageId) return
+            const [fresh] = normalizeNewIncomingMessage(response.data)
+            if (fresh?.revoked || !sameHistoryChat(chat, getMessageHistoryChat(selfId, fresh, chat))) return
+            const imageIndex = getImageSegments(message).indexOf(item)
+            url = getImageSegments(fresh)[imageIndex]?.url
+            if (typeof url !== 'string') return
+            image = await loadHistoryImage(selfId, url)
+        }
+        if (!image || !url || !isCurrent()) return
+        if (chat && messageId && (image.cache || url !== previousUrl || message._from_local_db)) {
+            const applied = await dbRefreshImageUrl(selfId, chat, messageId, index, previousUrl, url, image.cache)
+            if (!isCurrent()) return
+            // A live message can be previewed before its first save. A rejected write is stale.
+            if (applied === false || (applied === null && message._from_local_db)) return ''
+            if (applied === true && url !== previousUrl) item.url = url
+        }
+        return image.src
     } catch {
         // Leave the record available for another attempt when the bot or CDN recovers.
+    } finally {
+        stopWatching?.()
     }
     return undefined
 }
@@ -2280,7 +2306,7 @@ export async function resolveHistoryMessageImage(
  * @param msg 要处理的消息
  */
 async function msgPreprocess(msg: any): Promise<any> {
-    if (msg?._preprocessed || !Array.isArray(msg?.message)) return msg
+    if (!Array.isArray(msg?.message)) return msg
     normalizeForwardSegments(msg.message)
     for (const segment of msg.message) {
         if (segment?.type !== 'forward') continue
@@ -2321,6 +2347,9 @@ function revokeMsg(_: string, msg: any) {
     const chatId = isGroupRecall ? msg.group_id : msg.user_id
 
     const msgId = msg.message_id
+    if (msgId == null) return
+    const selfId = authStore.loginInfo.uin
+    const localHistory = isTauriHistoryAvailable()
     const isCurrentChat = String(chatId) === String(chatStore.chatInfo.show.id) &&
         isGroupRecall === (chatStore.chatInfo.show.type === 'group')
 
@@ -2337,12 +2366,12 @@ function revokeMsg(_: string, msg: any) {
         }
     }
 
-    const targetForSelfCheck = msgGet ?? antiRecallCache.getRecentMessage(authStore.loginInfo.uin, msgId)
+    const targetForSelfCheck = msgGet ?? antiRecallCache.getRecentMessage(selfId, msgId)
     const shouldIntercept = settingsStore.sysConfig.anti_recall === true &&
-        !isSelfRecallNotice(msg, authStore.loginInfo.uin, targetForSelfCheck)
+        !isSelfRecallNotice(msg, selfId, targetForSelfCheck)
 
     if (shouldIntercept) {
-        const preserved = antiRecallCache.captureRecall(authStore.loginInfo.uin, msg, msgGet)
+        const preserved = antiRecallCache.captureRecall(selfId, msg, msgGet)
         if (isCurrentChat && msgGet && msgGet.post_type !== 'notice' && Array.isArray(msgGet.message) && msgGet.message.length > 0) {
             chatStore.messageList.splice(msgIndex, 1, preserved ?? markMessageRevoked(msgGet, msg))
             return
@@ -2352,8 +2381,10 @@ function revokeMsg(_: string, msg: any) {
         }
         // 未能在内存中找到原消息体：保留本地 DB 记录不被标记删除，并允许后续降级为撤回提示
     } else {
-        // 在本地 DB 中标记撤回
-        dbRevokeMessage(authStore.loginInfo.uin, String(msgId))
+        // 普通撤回同时更新本地记录并中止进行中的媒体恢复。
+        void dbRevokeMessage(selfId, String(msgId))
+        const chat = historyChatForView({ id: chatId, type: isGroupRecall ? 'group' : 'private' })
+        if (localHistory && chat) notifyMessageRecall({ selfId, chat, messageId: msgId })
     }
 
     // 清除通知
@@ -2369,6 +2400,7 @@ function revokeMsg(_: string, msg: any) {
     }
     // 重复的撤回事件：保留已有提示及其 originMsg（重新编辑）
     if (msgGet.post_type === 'notice') return
+    if (localHistory && !shouldIntercept) invalidateHistoryMedia(msgGet)
 
     if (msgGet.sender.user_id === authStore.loginInfo.uin)
         msg.originMsg = msgGet

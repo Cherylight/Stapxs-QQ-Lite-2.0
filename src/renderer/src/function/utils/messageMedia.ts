@@ -1,3 +1,65 @@
+export type HistoryChat = { id: number, type: 'group' | 'private' }
+
+type MessageRecall = {
+    selfId: number | string
+    chat: HistoryChat
+    messageId: number | string
+}
+
+type HistoryMediaMessage = {
+    message_id?: number | string
+    revoked?: boolean
+    recall_info?: unknown
+    _historyMediaInvalidated?: boolean
+}
+
+// 防撤回保留的消息使用 revoked 显示标记，原有媒体仍可查看。
+export function canUseHistoryMedia(message: HistoryMediaMessage) {
+    return !message._historyMediaInvalidated && (!message.revoked || !!message.recall_info)
+}
+
+export function invalidateHistoryMedia(message: HistoryMediaMessage) {
+    message._historyMediaInvalidated = true
+    message.revoked = true
+}
+
+const recallListeners = new Set<(notice: MessageRecall) => void>()
+
+export function onMessageRecall(listener: (notice: MessageRecall) => void) {
+    recallListeners.add(listener)
+    return () => { recallListeners.delete(listener) }
+}
+
+export function notifyMessageRecall(notice: MessageRecall) {
+    for (const listener of recallListeners) listener(notice)
+}
+
+export function historyChatForView(view: { id: number, type: string }): HistoryChat | undefined {
+    const id = Number(view.id)
+    if (!Number.isSafeInteger(id) || id <= 0) return
+    return { id, type: view.type === 'group' ? 'group' : 'private' }
+}
+
+export function sameHistoryChat(a: HistoryChat | undefined, b: HistoryChat | undefined) {
+    return !!a && !!b && a.id === b.id && a.type === b.type
+}
+
+// Only active media requests subscribe. The app holds no history of recall notifications.
+export function watchMediaRecall(
+    selfId: number | string,
+    chat: HistoryChat | undefined,
+    message: HistoryMediaMessage,
+) {
+    if (!chat || message.message_id == null) return
+    const messageId = String(message.message_id)
+    return onMessageRecall((notice) => {
+        if (String(notice.selfId) === String(selfId) && sameHistoryChat(chat, notice.chat) &&
+            String(notice.messageId) === messageId) {
+            invalidateHistoryMedia(message)
+        }
+    })
+}
+
 export type ForwardSegment = {
     type: 'forward'
     id?: string | number
